@@ -1,9 +1,9 @@
 import SwiftUI
+import LocalAuthentication
 
 enum PINMode {
-    case setup      // первый запуск — задать PIN
-    case confirm    // подтвердить PIN при setup
-    case unlock     // ввести PIN для входа
+    case setup
+    case unlock
 }
 
 struct PINView: View {
@@ -11,28 +11,50 @@ struct PINView: View {
     let onSuccess: () -> Void
 
     @State private var entered = ""
-    @State private var firstEntry = ""   // при setup — хранит первый ввод
+    @State private var firstEntry = ""
     @State private var shake = false
     @State private var showConfirm = false
     @State private var errorMessage: String?
 
     private let pinLength = 4
 
+    // MARK: - Biometric
+
+    private var biometricType: LABiometryType {
+        let ctx = LAContext()
+        ctx.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil)
+        return ctx.biometryType
+    }
+
+    private var biometricAvailable: Bool {
+        LAContext().canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil)
+    }
+
+    private var biometricEnabled: Bool {
+        KeychainService.load(forKey: KeychainService.Key.biometricEnabled) == "true"
+    }
+
+    private var biometricIcon: String {
+        biometricType == .faceID ? "faceid" : "touchid"
+    }
+
+    // MARK: - Titles
+
     private var title: String {
         switch mode {
-        case .setup:    return showConfirm ? "Подтвердите PIN" : "Создайте PIN"
-        case .confirm:  return "Подтвердите PIN"
-        case .unlock:   return "Введите PIN"
+        case .setup:   return showConfirm ? "Подтвердите PIN" : "Создайте PIN"
+        case .unlock:  return "Введите PIN"
         }
     }
 
     private var subtitle: String {
         switch mode {
-        case .setup:    return showConfirm ? "Введите PIN ещё раз" : "Придумайте 4-значный PIN"
-        case .confirm:  return "Введите PIN ещё раз"
-        case .unlock:   return "Добро пожаловать в Finech"
+        case .setup:   return showConfirm ? "Введите PIN ещё раз" : "Придумайте 4-значный PIN"
+        case .unlock:  return "Добро пожаловать в Finech"
         }
     }
+
+    // MARK: - Body
 
     var body: some View {
         ZStack {
@@ -49,22 +71,18 @@ struct PINView: View {
             VStack(spacing: 40) {
                 Spacer()
 
-                // Header
                 VStack(spacing: 10) {
                     Image(systemName: "rublesign.circle.fill")
                         .font(.system(size: 52))
                         .foregroundStyle(.white)
-
                     Text(title)
                         .font(.system(size: 24, weight: .bold, design: .rounded))
                         .foregroundStyle(.white)
-
                     Text(subtitle)
                         .font(.subheadline)
                         .foregroundStyle(.white.opacity(0.65))
                 }
 
-                // Dots
                 HStack(spacing: 20) {
                     ForEach(0..<pinLength, id: \.self) { i in
                         Circle()
@@ -82,10 +100,15 @@ struct PINView: View {
 
                 Spacer()
 
-                // Numpad
                 numpad
                     .padding(.horizontal, 40)
                     .padding(.bottom, 40)
+            }
+        }
+        .onAppear {
+            // При разблокировке с включённой биометрией — запрашиваем сразу
+            if mode == .unlock && biometricEnabled {
+                triggerBiometric()
             }
         }
     }
@@ -102,7 +125,12 @@ struct PINView: View {
                 }
             }
             HStack(spacing: 24) {
-                Color.clear.frame(width: 72, height: 72)
+                // Биометрия — только на экране разблокировки
+                if mode == .unlock && biometricEnabled && biometricAvailable {
+                    NumpadButton(icon: biometricIcon) { triggerBiometric() }
+                } else {
+                    Color.clear.frame(width: 72, height: 72)
+                }
                 NumpadButton(label: "0") { append("0") }
                 NumpadButton(label: "⌫", isDelete: true) { deleteLast() }
             }
@@ -128,12 +156,10 @@ struct PINView: View {
         switch mode {
         case .setup:
             if !showConfirm {
-                // Первый ввод — переходим к подтверждению
                 firstEntry = entered
                 entered = ""
                 showConfirm = true
             } else {
-                // Подтверждение
                 if entered == firstEntry {
                     KeychainService.save(entered, forKey: KeychainService.Key.userPin)
                     onSuccess()
@@ -143,19 +169,23 @@ struct PINView: View {
                     firstEntry = ""
                 }
             }
-        case .confirm:
-            if entered == firstEntry {
-                KeychainService.save(entered, forKey: KeychainService.Key.userPin)
-                onSuccess()
-            } else {
-                triggerError("PIN не совпадает")
-            }
         case .unlock:
             let saved = KeychainService.load(forKey: KeychainService.Key.userPin)
             if entered == saved {
                 onSuccess()
             } else {
                 triggerError("Неверный PIN")
+            }
+        }
+    }
+
+    private func triggerBiometric() {
+        let ctx = LAContext()
+        let reason = "Войдите в Finech"
+        ctx.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: reason) { success, _ in
+            DispatchQueue.main.async {
+                if success { onSuccess() }
+                // При ошибке или отмене — ничего не делаем, пользователь вводит PIN
             }
         }
     }
@@ -170,10 +200,103 @@ struct PINView: View {
     }
 }
 
+// MARK: - BiometricSetupView
+
+struct BiometricSetupView: View {
+    let onComplete: () -> Void
+
+    @State private var biometricType: LABiometryType = .none
+
+    private var icon: String {
+        biometricType == .faceID ? "faceid" : "touchid"
+    }
+
+    private var typeName: String {
+        biometricType == .faceID ? "Face ID" : "Touch ID"
+    }
+
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [
+                    Color(red: 0.07, green: 0.07, blue: 0.20),
+                    Color(red: 0.05, green: 0.18, blue: 0.42)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            .ignoresSafeArea()
+
+            VStack(spacing: 36) {
+                Spacer()
+
+                Image(systemName: icon)
+                    .font(.system(size: 72))
+                    .foregroundStyle(.white)
+                    .symbolEffect(.pulse)
+
+                VStack(spacing: 10) {
+                    Text("Использовать \(typeName)?")
+                        .font(.system(size: 24, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                    Text("Входите в Finech быстро и безопасно\nбез ввода PIN")
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.65))
+                        .multilineTextAlignment(.center)
+                }
+
+                Spacer()
+
+                VStack(spacing: 14) {
+                    Button {
+                        enableBiometric()
+                    } label: {
+                        Label("Включить \(typeName)", systemImage: icon)
+                            .font(.headline)
+                            .foregroundStyle(Color(red: 0.07, green: 0.07, blue: 0.20))
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 16)
+                            .background(.white, in: RoundedRectangle(cornerRadius: 16))
+                    }
+
+                    Button("Пропустить") {
+                        onComplete()
+                    }
+                    .font(.subheadline)
+                    .foregroundStyle(.white.opacity(0.6))
+                }
+                .padding(.horizontal, 40)
+                .padding(.bottom, 48)
+            }
+        }
+        .onAppear {
+            let ctx = LAContext()
+            ctx.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil)
+            biometricType = ctx.biometryType
+        }
+    }
+
+    private func enableBiometric() {
+        let ctx = LAContext()
+        ctx.evaluatePolicy(
+            .deviceOwnerAuthenticationWithBiometrics,
+            localizedReason: "Подтвердите включение \(typeName)"
+        ) { success, _ in
+            DispatchQueue.main.async {
+                if success {
+                    KeychainService.save("true", forKey: KeychainService.Key.biometricEnabled)
+                }
+                onComplete()
+            }
+        }
+    }
+}
+
 // MARK: - NumpadButton
 
 private struct NumpadButton: View {
-    let label: String
+    var label: String?
+    var icon: String?
     var isDelete = false
     let action: () -> Void
 
@@ -181,11 +304,18 @@ private struct NumpadButton: View {
 
     var body: some View {
         Button(action: action) {
-            Text(label)
-                .font(.system(size: isDelete ? 22 : 28, weight: .medium, design: .rounded))
-                .foregroundStyle(.white)
-                .frame(width: 72, height: 72)
-                .background(.white.opacity(pressed ? 0.35 : 0.15), in: Circle())
+            Group {
+                if let icon {
+                    Image(systemName: icon)
+                        .font(.system(size: 26, weight: .light))
+                } else {
+                    Text(label ?? "")
+                        .font(.system(size: isDelete ? 22 : 28, weight: .medium, design: .rounded))
+                }
+            }
+            .foregroundStyle(.white)
+            .frame(width: 72, height: 72)
+            .background(.white.opacity(pressed ? 0.35 : 0.15), in: Circle())
         }
         .buttonStyle(.plain)
         .simultaneousGesture(
@@ -196,11 +326,10 @@ private struct NumpadButton: View {
     }
 }
 
-// MARK: - Shake animation
+// MARK: - ShakeModifier
 
 private struct ShakeModifier: ViewModifier {
     let trigger: Bool
-
     func body(content: Content) -> some View {
         content
             .offset(x: trigger ? -8 : 0)

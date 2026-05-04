@@ -4,14 +4,12 @@ import SwiftUI
 struct FinechApp: App {
     @State private var transactionVM = TransactionViewModel()
     @State private var exchangeRateVM = ExchangeRateViewModel()
-
-    // Три шага запуска: splash → pin → main
     @State private var appPhase: AppPhase = .splash
 
-    private enum AppPhase { case splash, pin, main }
+    private enum AppPhase { case splash, pin, biometricSetup, main }
 
-    private var pinMode: PINMode {
-        KeychainService.load(forKey: KeychainService.Key.userPin) == nil ? .setup : .unlock
+    private var isNewUser: Bool {
+        KeychainService.load(forKey: KeychainService.Key.userPin) == nil
     }
 
     var body: some Scene {
@@ -21,11 +19,23 @@ struct FinechApp: App {
                 case .splash:
                     SplashView()
                         .transition(.opacity)
+
                 case .pin:
-                    PINView(mode: pinMode) {
+                    PINView(mode: isNewUser ? .setup : .unlock) {
+                        if isNewUser {
+                            withAnimation(.easeInOut(duration: 0.4)) { appPhase = .biometricSetup }
+                        } else {
+                            withAnimation(.easeInOut(duration: 0.4)) { appPhase = .main }
+                        }
+                    }
+                    .transition(.opacity)
+
+                case .biometricSetup:
+                    BiometricSetupView {
                         withAnimation(.easeInOut(duration: 0.4)) { appPhase = .main }
                     }
                     .transition(.opacity)
+
                 case .main:
                     MainTabView()
                         .environment(transactionVM)
